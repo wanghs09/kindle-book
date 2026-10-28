@@ -1,0 +1,66 @@
+{
+  "format": 1,
+  "title": {
+    "en": "Kindle Book Builder",
+    "zh": "Kindle 编书"
+  },
+  "description": {
+    "en": "Turn the articles you saved for later into EPUB/AZW3 books you can read offline.",
+    "zh": "把攒下的文章编成 EPUB/AZW3，离线读。"
+  },
+  "metadata": {
+    "categories": {
+      "reading": {
+        "title": { "en": "Reading", "zh": "阅读" }
+      },
+      "export": {
+        "title": { "en": "Export", "zh": "导出" }
+      }
+    },
+    "labels": {
+      "macos": { "title": { "en": "macOS", "zh": "macOS" } },
+      "linux": { "title": { "en": "Linux", "zh": "Linux" } },
+      "windows": { "title": { "en": "Windows", "zh": "Windows" } },
+      "web-ui": { "title": { "en": "Web UI", "zh": "网页界面" } },
+      "agent-tool": { "title": { "en": "Agent tool", "zh": "Agent 工具" } }
+    }
+  },
+  "plugins": [
+    {
+      "name": "dsh-plugin-kindle-book",
+      "title": {
+        "en": "Kindle Book Builder",
+        "zh": "Kindle 编书"
+      },
+      "description": {
+        "en": "Paste article links in a sidebar page and get an EPUB (plus AZW3 through calibre) to read offline. Also registers a `kindle_book` tool for the agent.",
+        "zh": "在侧栏页面粘贴文章链接，生成可离线阅读的 EPUB（装 calibre 还能出 AZW3）；同时给 Agent 一个 kindle_book 工具。"
+      },
+      "icon": "./icon.svg",
+      "author": "wanghs09",
+      "homepage": "https://github.com/wanghs09/dsh-plugin-kindle-book#readme",
+      "repository": {
+        "url": "https://github.com/wanghs09/dsh-plugin-kindle-book"
+      },
+      "metadata": {
+        "category": "reading",
+        "keywords": ["kindle", "epub", "azw3", "read-later", "news", "calibre"],
+        "labels": ["macos", "linux", "windows", "web-ui", "agent-tool"]
+      },
+      "versions": [
+        {
+          "version": "1.0.0",
+          "publishTimestamp": 1793073727,
+          "source": {
+            "type": "git",
+            "url": "https://github.com/wanghs09/dsh-plugin-kindle-book",
+            "commit": "caad94b5731903745ae83b0e452b80bd45aa5312"
+          },
+          "engines": {
+            "dsh": ">=0.2.1-0"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JavaScript syntax
+        run: |
+          node --check index.js
+          node --check client.js
+          node --check scripts/smoke.mjs
+
+      - name: JSON files
+        run: |
+          node -e "for (const f of ['package.json','locale/en.json','locale/zh.json','market-index.json']) { JSON.parse(require('node:fs').readFileSync(f,'utf8')); console.log('ok', f) }"
+
+      - name: Python syntax
+        run: python3 -c "import ast; ast.parse(open('news2kindle.py', encoding='utf-8').read()); print('ok news2kindle.py')"
+
+      - name: Manifest consistency
+        run: |
+          node -e "
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json','utf8'));
+          const patch = fs.readFileSync('cordis.patch.yml','utf8');
+          const client = fs.readFileSync('client.js','utf8');
+          const fails = [];
+          if (!patch.includes(\`name: '\${pkg.name}'\`)) fails.push('cordis.patch.yml row name != package name');
+          if (!client.includes(\`id: \"\${pkg.name}\"\`)) fails.push('client.js module id != package name');
+          for (const file of ['index.js','client.js','news2kindle.py','cordis.patch.yml','icon.svg','README.md','LICENSE']) {
+            if (!fs.existsSync(file)) fails.push('missing ' + file);
+          }
+          if (fails.length > 0) { console.error(fails.join('\n')); process.exit(1); }
+          console.log('manifest ok');
+          "
+
+      - name: Offline smoke
+        run: node scripts/smoke.mjs

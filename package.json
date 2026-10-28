@@ -1,0 +1,58 @@
+{
+  "name": "dsh-plugin-kindle-book",
+  "version": "1.0.0",
+  "description": "把网页新闻抓成 EPUB/AZW3：Web 界面粘贴链接即可编书，同时向 Agent 提供一个 kindle_book 工具。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "kindle",
+    "epub",
+    "azw3",
+    "read-later",
+    "news"
+  ],
+  "license": "MIT",
+  "author": "wanghs09",
+  "homepage": "https://github.com/wanghs09/dsh-plugin-kindle-book#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wanghs09/dsh-plugin-kindle-book.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wanghs09/dsh-plugin-kindle-book/issues"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "news2kindle.py",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  }
+}

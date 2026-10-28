@@ -1,0 +1,3 @@
+- insert:
+    - id: kindle-book
+      name: 'dsh-plugin-kindle-book'
