@@ -95,8 +95,10 @@ https://www.chinanews.com.cn/cj/2026/10-27/10721502.shtml | 统计局：工业�
 | [calibre](https://calibre-ebook.com/) | 可选 | 只有 AZW3 需要；缺了就只出 EPUB |
 | DSH `>= 0.2.1-0` | 插件必需 | 用到 webServer 路由、侧栏槽位与工具注册 |
 
-- 国际站点（BBC / NYT / Guardian 等）本机直连不通，需代理；微信长文偶发 `IncompleteRead`，重新生成即可。
-- 付费墙、纯 JS 渲染的页面会抓不到正文，脚本会报 `FAIL` 并列出来。
+- 国际站点（BBC / NYT / Guardian 等）本机直连不通，需代理；微信长文偶发 `IncompleteRead` / 反爬抖动，脚本已自动重试 3 次（`NEWS2KINDLE_FETCH_RETRIES` 可调），仍失败才列入「未收录」。
+- 付费墙、纯 JS 渲染、被微信环境异常拦截的页面会抓不到正文，脚本报 `FAIL` 并列出来。
+- 摘要仅在配置了 `DEEPSEEK_API_KEY` 时发起（书首生成「内容摘要」章，逐篇要点可锚点跳转）；单篇失败自动跳过，不影响其余文章与出书。
+- 封面字体自动跨平台探测 macOS（苹方/宋体）、Linux（Noto/文泉驿）、Windows（雅黑/黑体）；都找不到时跳过封面，只出 EPUB。
 - 只保留文字，图片和视频一律丢弃。
 - 插件并发构建返回 409（一次一本）。
 

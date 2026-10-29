@@ -19,13 +19,16 @@ urls.txt 每行一条，支持:
 
 import argparse
 import datetime
+import glob
 import hashlib
 import html as htmllib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 import unicodedata
 import zipfile
 from urllib.parse import urlparse, urljoin
@@ -99,6 +102,98 @@ def fetch(url: str, timeout: int = 30) -> str:
         import gzip
         raw = gzip.decompress(raw)
     return decode_body(raw, enc)
+
+
+FETCH_RETRIES = int(os.environ.get("NEWS2KINDLE_FETCH_RETRIES", "3"))
+
+
+def fetch_retry(url: str, retries: int = FETCH_RETRIES, timeout: int = 30) -> str:
+    """抓取带有限重试：微信长文偶发 IncompleteRead / 反爬抖动，退避后重试。"""
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            return fetch(url, timeout)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1.5 * attempt)
+    raise last_exc
+
+
+# --------------------------------------------------------------------------- #
+# 内容摘要（DeepSeek，OpenAI 兼容 /chat/completions）
+# --------------------------------------------------------------------------- #
+DEEPSEEK_BASE_URL = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+# 喂给模型的正文上限（字符），避免长文超 token；摘要输出上限由 max_tokens 控制。
+SUMMARY_INPUT_CHARS = int(os.environ.get("NEWS2KINDLE_SUMMARY_INPUT", "6000"))
+SUMMARY_TIMEOUT = int(os.environ.get("NEWS2KINDLE_SUMMARY_TIMEOUT", "60"))
+
+SUMMARY_SYSTEM_PROMPT = (
+    "你是资深中文编辑。阅读下面这篇文章，写一段中文摘要（120–200 字），"
+    "概括文章主题、核心观点、关键结论或重要数据；拆成 3–5 条要点，每条单独一行，"
+    "以「· 」开头。不要复述标题，不要写客套话，不要补充原文没有的信息，不要输出 Markdown 标题。"
+)
+
+
+def article_plain_text(art: dict) -> str:
+    """把一篇已提取的文章拼成喂给模型的纯文本。"""
+    head = " · ".join(x for x in (art.get("site"), art.get("date"), art.get("author")) if x)
+    parts = [f"标题：{art['title']}"]
+    if head:
+        parts.append(f"出处：{head}")
+    parts.append("正文：")
+    for _, text in art["blocks"]:
+        parts.append(text)
+    body = "\n".join(parts)
+    if len(body) > SUMMARY_INPUT_CHARS:
+        body = body[:SUMMARY_INPUT_CHARS] + "\n……（正文过长，已截断）"
+    return body
+
+
+def summarize_article(art: dict, model: str = "", max_tokens: int = 600) -> str:
+    """调用 DeepSeek 生成单篇摘要；任何失败都返回空串，由上层降级处理。"""
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if not api_key:
+        return ""
+    payload = {
+        "model": model or DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": SUMMARY_SYSTEM_PROMPT},
+            {"role": "user", "content": article_plain_text(art)},
+        ],
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    req = Request(
+        f"{DEEPSEEK_BASE_URL}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urlopen(req, timeout=SUMMARY_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        content = (data["choices"][0]["message"].get("content") or "").strip()
+        if not content:
+            return ""
+    except Exception as exc:  # 网络 / 限流 / 超时 / 格式异常一律降级，不阻断出书
+        print(f"    摘要请求失败：{exc}")
+        return ""
+    # 去掉模型偶尔夹带的 Markdown 加粗/斜杠，规范要点行前缀
+    lines = []
+    for raw in content.splitlines():
+        line = raw.strip().strip("*#").strip()
+        if not line:
+            continue
+        line = re.sub(r"^[·•\-–—*\d.)、]+\s*", "", line)
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------- #
@@ -363,11 +458,52 @@ p { margin: 0 0 0.75em; text-indent: 0; }
 blockquote { margin: 0.8em 1.2em; color: #444; font-style: italic; }
 li { margin: 0 0 0.4em 1.2em; }
 .sep { text-align: center; margin: 2em 0; color: #999; }
+a { color: #2a6bb0; }
+.summary-intro { font-size: 0.88em; color: #666; margin: 0 0 1.2em; line-height: 1.5; }
+.summary-item { margin: 1.2em 0; }
+.summary-item h2 { margin: 0 0 0.25em; }
+.summary-item .meta { margin-bottom: 0.5em; }
+.summary-line { margin: 0 0 0.4em 1em; }
 """
 
 
 def esc(s: str) -> str:
     return htmllib.escape(s, quote=False)
+
+
+def _load_cover_font(size: int):
+    """跨平台加载一款可渲染中文的封面字体；找不到返回 None。"""
+    from PIL import ImageFont
+    candidates = [
+        # macOS
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Medium.ttc",
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        # Linux（Noto CJK / 文泉驿 / 思源）
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Medium.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
+        "/usr/share/fonts/truetype/arphic/uming.ttc",
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        # Windows
+        r"C:\Windows\Fonts\msyh.ttc",
+        r"C:\Windows\Fonts\simhei.ttf",
+    ]
+    for fp in candidates:
+        if os.path.exists(fp):
+            try:
+                return ImageFont.truetype(fp, size)
+            except OSError:
+                continue
+    # 兜底：在常见字体目录里按 CJK / 中文关键字找一款可用字体
+    for pattern in ("/usr/share/fonts/**/*CJK*", "/usr/share/fonts/**/*wqy*",
+                    "/usr/share/fonts/**/*Han*", "/usr/share/fonts/**/*.ttc"):
+        for fp in sorted(glob.glob(pattern, recursive=True)):
+            try:
+                return ImageFont.truetype(fp, size)
+            except OSError:
+                continue
+    return None
 
 
 def build_cover(path, book_title, subtitle):
@@ -379,15 +515,7 @@ def build_cover(path, book_title, subtitle):
     img = Image.new("RGB", (W, H), "#1c2b33")
     d = ImageDraw.Draw(img)
     d.rectangle([0, 0, W, 12], fill="#c8a45c")
-    font = None
-    for fp in ("/System/Library/Fonts/PingFang.ttc", "/System/Library/Fonts/STHeiti Medium.ttc",
-               "/System/Library/Fonts/Supplemental/Songti.ttc"):
-        if os.path.exists(fp):
-            try:
-                font = ImageFont.truetype(fp, 74)
-                break
-            except OSError:
-                continue
+    font = _load_cover_font(74)
     if font is None:
         return False
     # 按宽度折行：优先在「｜·/」空格等分隔处断行，避免把词拆开或末行只剩孤字
@@ -433,12 +561,52 @@ def slugify(name: str) -> str:
     return s[:60] or "kindle-news"
 
 
+def _page_html(title, body_parts):
+    return ('<?xml version="1.0" encoding="utf-8"?>\n'
+            '<!DOCTYPE html>\n'
+            '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN" lang="zh-CN">\n'
+            f'<head><meta charset="utf-8"/><title>{esc(title)}</title>'
+            '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
+            '<body>\n<section epub:type="chapter" xmlns:epub="http://www.idpf.org/2007/ops">'
+            + "\n".join(body_parts) + "</section>\n</body>\n</html>")
+
+
 def build_epub(articles, book_title, author, out_path, cover_path=None):
     uid = "urn:uuid:" + hashlib.sha1(
         (book_title + "".join(a["url"] for a in articles)).encode()).hexdigest()
     modified = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    chapters, manifest, spine, nav_items, ncx_points = [], [], [], [], []
+    summaries = [a.get("summary") or "" for a in articles]
+    has_summary = any(summaries)
+
+    pages, manifest, spine, nav_items, ncx_points = [], [], [], [], []
+    play_order = 0
+
+    # 书首「内容摘要」总章：目录之后、正文之前，逐篇要点 + 锚点跳转对应章节
+    if has_summary:
+        intro_body = [
+            "<h1>内容摘要</h1>",
+            f'<p class="summary-intro">共 {len(articles)} 篇 · {datetime.date.today().isoformat()}'
+            "（点击标题跳转到对应正文）</p>"]
+        for i, (a, summary) in enumerate(zip(articles, summaries), 1):
+            cid = f"c{i:03d}"
+            if not summary:
+                continue
+            intro_body.append('<div class="summary-item">')
+            intro_body.append(f'<h2><a href="{cid}.xhtml">{esc(a["title"])}</a></h2>')
+            intro_body.append('<div class="summary-body">')
+            for line in summary.splitlines():
+                intro_body.append(f'<p class="summary-line">· {esc(line)}</p>')
+            intro_body.append("</div></div>")
+        pages.append(("intro.xhtml", _page_html("内容摘要", intro_body)))
+        play_order += 1
+        manifest.append('<item id="intro" href="intro.xhtml" media-type="application/xhtml+xml"/>')
+        spine.append('<itemref idref="intro"/>')
+        nav_items.append('<li><a href="intro.xhtml">内容摘要</a></li>')
+        ncx_points.append(
+            f'<navPoint id="np-intro" playOrder="{play_order}"><navLabel><text>内容摘要</text></navLabel>'
+            '<content src="intro.xhtml"/></navPoint>')
+
     for i, a in enumerate(articles, 1):
         cid = f"c{i:03d}"
         fid = f"{cid}.xhtml"
@@ -461,32 +629,25 @@ def build_epub(articles, book_title, author, out_path, cover_path=None):
                 body.append(f"<p>{esc(text)}</p>")
         if i < len(articles):
             body.append('<p class="sep">* * *</p>')
-        chapters.append(
-            '<?xml version="1.0" encoding="utf-8"?>\n'
-            '<!DOCTYPE html>\n'
-            '<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="zh-CN" lang="zh-CN">\n'
-            f'<head><meta charset="utf-8"/><title>{esc(a["title"])}</title>'
-            '<link rel="stylesheet" type="text/css" href="style.css"/></head>\n'
-            f'<body>\n<section epub:type="chapter" xmlns:epub="http://www.idpf.org/2007/ops">'
-            + "\n".join(body) + "</section>\n</body>\n</html>")
+        pages.append((fid, _page_html(a["title"], body)))
+        play_order += 1
         manifest.append(f'<item id="{cid}" href="{fid}" media-type="application/xhtml+xml"/>')
         spine.append(f'<itemref idref="{cid}"/>')
         nav_items.append(f'<li><a href="{fid}">{esc(a["title"])}</a></li>')
         ncx_points.append(
-            f'<navPoint id="np{i}" playOrder="{i}"><navLabel><text>{esc(a["title"])}</text></navLabel>'
+            f'<navPoint id="np{i}" playOrder="{play_order}"><navLabel><text>{esc(a["title"])}</text></navLabel>'
             f'<content src="{fid}"/></navPoint>')
 
-    cover_manifest, cover_meta, cover_spine = "", "", ""
+    cover_manifest, cover_meta, cover_spine, cover_page = "", "", "", None
     if cover_path and os.path.exists(cover_path):
         cover_manifest = '<item id="cover" href="cover.png" media-type="image/png" properties="cover-image"/>'
         cover_meta = '<meta name="cover" content="cover"/>'
         cover_spine = '<itemref idref="cover-page" linear="no"/>'
-        chapters.append(
-            '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
-            '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/>'
-            '<title>封面</title><style>html,body{margin:0;padding:0;height:100%;}'
-            'img{max-width:100%;max-height:100%;}</style></head>'
-            '<body><div style="text-align:center"><img src="cover.png" alt="cover"/></div></body></html>')
+        cover_page = ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+                      '<html xmlns="http://www.w3.org/1999/xhtml"><head><meta charset="utf-8"/>'
+                      '<title>封面</title><style>html,body{margin:0;padding:0;height:100%;}'
+                      'img{max-width:100%;max-height:100%;}</style></head>'
+                      '<body><div style="text-align:center"><img src="cover.png" alt="cover"/></div></body></html>')
         manifest.append('<item id="cover-page" href="cover.xhtml" media-type="application/xhtml+xml"/>')
 
     nav = ('<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
@@ -531,7 +692,6 @@ def build_epub(articles, book_title, author, out_path, cover_path=None):
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     with zipfile.ZipFile(out_path, "w") as z:
         z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip", zipfile.ZIP_STORED)
-        pages = list(chapters)
         with z.open("META-INF/container.xml", "w") as fh:
             fh.write(container.encode())
         names = ["OEBPS/style.css", "OEBPS/nav.xhtml", "OEBPS/toc.ncx", "OEBPS/content.opf"]
@@ -539,10 +699,12 @@ def build_epub(articles, book_title, author, out_path, cover_path=None):
         for n, c in zip(names, contents):
             with z.open(n, "w") as fh:
                 fh.write(c.encode("utf-8"))
-        for i, page in enumerate(pages, 1):
-            name = "OEBPS/cover.xhtml" if (cover_path and i == len(pages)) else f"OEBPS/c{i:03d}.xhtml"
-            with z.open(name, "w") as fh:
+        for fid, page in pages:
+            with z.open(f"OEBPS/{fid}", "w") as fh:
                 fh.write(page.encode("utf-8"))
+        if cover_page is not None:
+            with z.open("OEBPS/cover.xhtml", "w") as fh:
+                fh.write(cover_page.encode("utf-8"))
         if cover_path and os.path.exists(cover_path):
             z.write(cover_path, "OEBPS/cover.png", zipfile.ZIP_DEFLATED)
     return out_path
@@ -587,6 +749,9 @@ def main():
     ap.add_argument("--outdir", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "out"))
     ap.add_argument("--azw3", action="store_true", help="同时用 calibre 转 AZW3")
     ap.add_argument("--no-cover", action="store_true")
+    ap.add_argument("--no-summary", action="store_true", help="不生成每篇摘要（默认开启，需 DEEPSEEK_API_KEY）")
+    ap.add_argument("--summary-model", default="", help="覆盖摘要模型，默认 deepseek-chat")
+    ap.add_argument("--summary-max-tokens", type=int, default=600, help="摘要输出 token 上限")
     ap.add_argument("--min-chars", type=int, default=120, help="正文少于该字数视为失败")
     args = ap.parse_args()
 
@@ -597,22 +762,58 @@ def main():
     articles, failed = [], []
     for i, (url, override) in enumerate(targets, 1):
         print(f"[{i}/{len(targets)}] {url}")
-        try:
-            page = fetch(url)
-            art = extract(url, page)
-            if override:
-                art["title"] = override
-            if art["chars"] < args.min_chars:
-                raise RuntimeError(f"只提取到 {art['chars']} 字，可能被墙/需登录/正文在 JS 里")
+        art, last_exc = None, None
+        # 网络断流由 fetch_retry 内部重试；此处再对“下载成功但解析为空 / 反爬拦截”多轮重抓。
+        passes = int(os.environ.get("NEWS2KINDLE_FETCH_PASSES", "4"))
+        for attempt in range(1, passes + 1):
+            try:
+                page = fetch_retry(url)
+                candidate = extract(url, page)
+                if override:
+                    candidate["title"] = override
+                if candidate["chars"] < args.min_chars:
+                    raise RuntimeError(f"只提取到 {candidate['chars']} 字，可能被墙/需登录/正文在 JS 里")
+                art = candidate
+                break
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if attempt < passes:
+                    print(f"    第 {attempt}/{passes} 次未成功（{exc}），{2 * attempt}s 后重抓…")
+                    time.sleep(2 * attempt)
+        if art is not None:
+            art["summary"] = ""
             articles.append(art)
             print(f"    ok  {art['chars']} 字 · {art['title'][:60]}")
-        except Exception as exc:  # noqa: BLE001
-            failed.append((url, str(exc)))
-            print(f"    FAIL {exc}")
+        else:
+            failed.append((url, str(last_exc)))
+            print(f"    FAIL {last_exc}")
 
     if not articles:
         print("\n没有成功抓取任何文章，未生成文件。")
         return 1
+
+    # 逐篇生成摘要；未配置 Key、关闭开关或单篇失败都只跳过该篇，不阻断出书。
+    if not args.no_summary:
+        if not os.environ.get("DEEPSEEK_API_KEY", "").strip():
+            print("\n未设置 DEEPSEEK_API_KEY，跳过内容摘要"
+                  "（export DEEPSEEK_API_KEY=... 后自动启用；--no-summary 可手动关闭）。")
+        else:
+            print(f"\n开始生成 {len(articles)} 篇摘要（{args.summary_model or DEEPSEEK_MODEL}）…")
+            summarized = 0
+            for i, art in enumerate(articles, 1):
+                print(f"[摘要 {i}/{len(articles)}] {art['title'][:50]}")
+                try:
+                    art["summary"] = summarize_article(
+                        art, model=args.summary_model, max_tokens=args.summary_max_tokens)
+                except Exception as exc:  # 兜底：单篇异常不得中断整本书
+                    print(f"    摘要异常：{exc}")
+                    art["summary"] = ""
+                if art["summary"]:
+                    summarized += 1
+                    print(f"    ok  {len(art['summary'])} 字")
+                else:
+                    print("    该篇未生成摘要，正文照常收录")
+            print(f"摘要完成：{summarized}/{len(articles)} 篇")
 
     outdir = os.path.join(args.outdir, slug)
     epub_path = os.path.join(outdir, f"{slug}.epub")

@@ -127,7 +127,7 @@ node scripts/smoke.mjs --network  # 额外跑一次真实构建（会联网抓�
 
 - **AZW3 依赖 calibre**：没有 `ebook-convert` 时只出 EPUB。
 - **国际站点直连不通**：BBC / NYT / Guardian 等需要代理，否则作为失败链接列出。
-- **偶发 `IncompleteRead`**：微信长文偶尔中途断流（脚本单次读取、不重试），重新生成一次即可。
+- **偶发 `IncompleteRead`**：微信长文偶尔中途断流或反爬抖动，脚本自动重试 3 次（`NEWS2KINDLE_FETCH_RETRIES` 可调），仍失败才列入未收录。
 - **只有文字**：图片、视频按原脚本设定丢弃。
 - **一次一本**：并发构建返回 409。
 
